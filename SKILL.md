@@ -1,274 +1,313 @@
 ---
-name: controls
+name: generate2dsprite
 description: >
-  Player-facing input signs for browser games: WASD, vehicles, flight, FPS
-  mouse-look, and the #1 failure mode (inverted A/D). Mandatory control
-  self-tests and a tiny test interface so you can verify A turns left before
-  shipping. Load for ANY game with movement, steering, flying, driving, tanks,
-  boats, mechs, drones, planes, karts, third-person follow cams — not only
-  racing. Triggers on "controls", "WASD", "inverted", "steer", "flight",
-  "airplane", "kart", "vehicle", "yaw", "roll", "pitch", "mouse look", "A/D".
+  Generate and postprocess 2D game sprites and animation sheets: pixel-art
+  characters, NPCs, creatures, spells, projectiles, impacts, props, summons,
+  and transparent PNG/GIF exports. Use when building browser games that need
+  real sprite sheets (not code-drawn placeholders), matching a map art style,
+  or producing magenta-background sheets for chroma-key cleanup. Triggers on
+  "sprite", "sprite sheet", "animation sheet", "pixel art character", "walk
+  cycle", "attack animation", "projectile sprite", "2D game asset".
 metadata:
-  short-description: "Control signs, inverted A/D fix, vehicle/flight maps, mandatory self-test"
+  short-description: "2D sprite sheets: imagine_text_to_image + magenta chroma postprocess"
 user-invocable: false
 ---
 
-# Controls (player-visible signs — do not ship inverted)
+# Generate2dsprite
 
-**Read this end-to-end before writing movement/steer/flight code** for any game
-that uses WASD, arrows, a chase camera, or a flying craft. Do **not** skip this
-and only open `racing-kart` or `fps` — those genre files assume you already
-know these signs. Inverted A/D is the most common ship-blocker in vehicle and
-flight demos.
+Use this skill for self-contained 2D sprite or animation assets in the
+**app-builder sandbox** (TanStack Start + browser games).
 
-Pair with **`building-games`** (loop, camera, 3D orientation) and
-**`building-games/references/input.md`** (keydown state, gamepad, touch). This
-skill owns **what left/right/up mean to the player** and **how you prove it**.
+When a larger game or playable prototype needs sprites, use this skill for the
+visible sprite assets and keep runtime/game assembly separate (wire into Phaser /
+Canvas / DOM after export). Do not replace requested sprite assets with
+code-drawn placeholders.
 
----
+## App-builder / Grok environment
 
-## 0. Hard rules (fail the build if broken)
+| Item | Value |
+| --- | --- |
+| Skill dir | `.grok/skills/generate2dsprite/` |
+| Scripts | `python3 .grok/skills/generate2dsprite/scripts/<script>.py …` |
+| Image tools | `imagine_text_to_image` / `imagine_image_to_image` (path-based; see **`imagine`** skill for prompt craft) |
+| Inspect images | `read_file` on the PNG path (not Codex view_image) |
+| Generated image path | `imagine_text_to_image` returns a sandbox `file_path`; copy that path into your run dir before processing |
+| Python deps | Pillow + numpy (preinstalled in the image) |
+| Output home | Prefer `assets/sprites/<name>/` under `/workspace` so the app can import them |
+| Engine target | Browser: Canvas 2D, Phaser, or DOM/`<img>` — not Godot/Unity unless the user asks |
 
-1. **Player-visible left/right is law.** From a **chase / behind** camera while
-   the craft moves **forward**:
-   - **A / ←** → nose (or bank) turns **left on screen**
-   - **D / →** → nose (or bank) turns **right on screen**
-2. **Never reuse FPS strafe as vehicle steer.** FPS “D → +right vector” is
-   **position** on the ground plane. Vehicle A/D is **yaw (or roll) rate**, not
-   a strafe offset. Mixing them is the #1 cause of inverted A/D.
-3. **You must run a control self-test (§5) before saying done.** Screenshot-only
-   QA is not enough. If A turns right, **flip the steer/roll sign**, retest,
-   then ship — do not invent a new coordinate story.
+Related skills: **`imagine`** (image tool usage), **`game-asset-core`** (+
+`game-animation-frames` / `game-character-consistency` for QC and engine-ready
+defaults), **`generate2dmap`** (maps/props), **`video2dsprite`** (denser motion
+via `imagine_image_to_video`), **`building-games`** (game loop / integration).
 
----
+## Parameters
 
-## 1. Shared 3D basis (use this everywhere)
+Infer these from the user request:
 
-three.js: right-handed, **+Y up**, meshes face **+Z**, cameras look **−Z**.
+- `asset_type`: `player` | `npc` | `creature` | `character` | `spell` | `projectile` | `impact` | `prop` | `summon` | `fx`
+- `action`: `single` | `idle` | `cast` | `attack` | `shoot` | `jump` | `hurt` | `combat` | `walk` | `run` | `hover` | `charge` | `projectile` | `impact` | `explode` | `death`
+- `view`: `topdown` | `side` | `3/4`
+- `sheet`: `auto` | `2x2` | `2x3` | `2x4` | `3x3` | `3x4` | `4x4` | `5x5` | `custom_grid` | `strip_1x3` | `strip_1x4`
+- `frames`: `auto` or explicit count
+- `bundle`: `single_asset` | `unit_bundle` | `spell_bundle` | `combat_bundle` | `line_bundle` | `hero_action_bundle` | `engine_atlas`
+- `effect_policy`: `all` | `largest`
+- `anchor`: `center` | `bottom` | `feet`
+- `margin`: `tight` | `normal` | `safe`
+- `art_style`: pixel_art | clean_hd | pixel_inspired | retro_pixel | map_style | project-native
+- `reference`: `none` | `attached_image` | `generated_image` | `local_file`
+- `layout_guide`: `none` | `optional` | `recommended`
+- `prompt`: the user's theme or visual direction
+- `role`: only when the asset is clearly an NPC role
+- `name`: optional output slug
 
-**Yaw-only heading on XZ** (ground vehicles, walkers, most arcade craft):
+Read [references/modes.md](references/modes.md) when the request is ambiguous.
 
-```
-// yaw = 0 faces world −Z; +yaw is CCW about +Y (nose moves toward −X)
-forward = (-sin(yaw), 0, -cos(yaw))
-right   = ( cos(yaw), 0, -sin(yaw))   // = normalize(cross(forward, worldUp))
-```
+## Agent Rules
 
-With a chase cam **behind** the craft (camera near `position - forward * dist`):
+- Decide the asset plan yourself. Do not force the user to spell out sheet size, frame count, or bundle structure when the request already implies them.
+- Do not pack unrelated actions into one raw generated sheet just to satisfy a `4x4`, `5x5`, or custom engine atlas. A raw generated sheet should represent one action family, one continuous sequence, one canonical directional locomotion sheet, or one prop/asset pack.
+- For controllable heroes, main characters, and high-value player assets with multiple actions, generate separate per-action grid sheets first, QC each action, then deterministically assemble the engine-required atlas only after the grids pass visual review.
+- For controllable heroes, main characters, and high-value player body actions, default attack/shoot/cast body sheets to body-only. Do not include large slash arcs, muzzle flashes, projectiles, impact bursts, detached dust, long trails, or wide detached FX in the body sheet. Generate those as separate `fx`, `projectile`, or `impact` sheets and layer them in the game.
+- Only include wide attack FX in the same raw body sheet when the target runtime explicitly supports wider per-action cells plus per-action origin/anchor metadata. Otherwise, a wide FX bbox will force the body to shrink inside the fixed cell.
+- Write the art prompt yourself. Do not default to the prompt-builder script.
+- Use built-in `imagine_text_to_image` for every raw image.
+- Do not create raw sprite art with Three.js, Canvas, SVG, HTML/CSS drawing, PIL shape drawing, procedural geometry, placeholder primitives, or code-rendered screenshots. Runtime code may display finished generated assets, and scripts may make layout guides or postprocess generated images, but requested sprite art must originate from built-in `imagine_text_to_image`.
+- When the user provides or implies a visual reference, pass that reference's sandbox `file_path` to `imagine_image_to_image` (the tool reads the file). Also `read_file` the local reference so you can see it; a path mentioned only inside the prompt is not a visual input.
+- Do not force pixel art when the asset is a map prop for `$generate2dmap` or when the user/project requests a different style. Match the map or reference style first.
+- Use the script only as a deterministic processor: magenta cleanup, frame splitting, component filtering, scaling, alignment, QC metadata, transparent sheet export, and GIF export.
+- Do not use scripts to generate the creative image prompt. If a legacy prompt-builder command exists, treat it as historical compatibility only, not the normal skill workflow.
+- Layout guides are allowed only as deterministic geometry references for image generation. They may show slot count, spacing, centering, and safe padding, but must never define the creative art direction.
+- Treat script flags as execution primitives chosen by the agent, not user-facing hardcoded workflow.
+- If a generated sheet touches cell edges, drifts in scale, or breaks a projectile / impact loop, either reprocess with better primitive settings or regenerate the raw sheet.
+- Do not use raw single-row sheets such as `1x4`, `1x6`, `1x8`, or `1xN` for characters, players, controllable heroes, creatures, NPCs, enemies, summons, animated props, or any asset where a body/subject must stay centered. Single-row raw generation is too likely to drift horizontally and crop inconsistently.
+- For animated body assets, use a multi-row grid by default: 4 frames -> `2x2`, 6 frames -> `2x3`, 8 frames -> `2x4`, 9 frames -> `3x3`, 12 frames -> `3x4` or `4x3`, 16 frames -> `4x4`.
+- If a game engine needs a final single-row strip or mixed atlas, first generate and QC the action as a multi-row grid, then assemble the delivery strip/atlas deterministically.
+- In every animated body grid prompt, require the subject body to stay centered in each cell, full body inside the central 60% to 70% safe area, consistent scale across cells, stable feet/bottom anchor line when applicable, and no limbs, weapons, hair, capes, dust, muzzle flashes, or detached FX crossing cell edges.
+- For hero attack body prompts, explicitly require body height and body scale to match the accepted idle/run sheets, stable feet/bottom anchor, weapon kept close enough to avoid widening the body bbox, and no detached slash arc or screen-space attack effect.
+- For map prop packs, classify props before choosing a grid. Square `2x2`, `3x3`, and `4x4` packs are only for compact props. Do not put platforms, floors, bridges, walls, ladders, gates, doors, long hazards, wide/tall props, collision-bearing objects, or tileset/strip pieces into square prop packs; use one-by-one, `1x3`/`1x4` strips, custom wide cells, or a tileset-like atlas instead.
+- Keep the solid `#FF00FF` background rule unless the user explicitly wants a different processing workflow.
 
-| Player sees | World (this basis) | Input |
-|-------------|--------------------|--------|
-| Nose left   | **+yaw**           | **A / ←** must produce **+yaw** (or equivalent bank-left for planes) |
-| Nose right  | **−yaw**           | **D / →** must produce **−yaw** |
+## Workflow
 
-If your basis differs, keep **one** consistent pair — but the **player-visible**
-row above is mandatory.
+### 1. Infer the asset plan
 
----
+Pick the smallest useful output.
 
-## 2. Genre maps
+Examples:
 
-### 2a. FPS / on-foot (strafe, not steer)
+- controllable hero with four directions -> `player` + `player_sheet`
+- side-view controllable hero with idle/run/shoot/jump -> `player` + `hero_action_bundle`
+  - idle grid sheet, usually `2x2` for 4 frames
+  - run grid sheet, usually `2x2` or `2x3` depending on needed frame count
+  - shoot grid sheet with body/weapon only, usually `2x2`
+  - jump grid sheet, usually `2x2`
+  - projectile / muzzle flash as separate assets when needed
+  - optional assembled engine atlas after per-action QC
+- side-view controllable hero with melee attack -> `player` + `hero_action_bundle`
+  - attack body grid sheet, usually `2x2` or `2x3`, body-only
+  - slash arc / weapon trail as a separate `fx` sheet when the attack needs a wide visual effect
+  - impact spark as a separate `impact` sheet when hits need feedback
+- healer overworld NPC -> `npc` + `single_asset` or `unit_bundle`
+- large boss idle loop -> `creature` + `idle` + `3x3`
+- wizard throwing a magic orb -> `spell_bundle`
+  - caster cast sheet
+  - projectile loop
+  - impact burst
+- monster line request -> `line_bundle`
+  - plan 1-3 forms
+  - per form, make the sheets the request actually needs
 
-```
-W = +forward, S = −forward, D = +right, A = −right   // position, not yaw
-mouse: yaw -= movementX * sens; pitch -= movementY * sens; clamp pitch
-```
+### 2. Write the prompt manually
 
-Body yaw for look; **movement uses yaw only** (do not apply pitch to walk).
+Use [references/prompt-rules.md](references/prompt-rules.md).
 
-### 2b. Ground / water vehicle (kart, bike, jetski, boat, tank, rover, snowmobile)
+Choose `art_style` before writing the prompt:
 
-Arcade body with `heading`/`yaw` and forward `speed`:
+- Use `pixel_art` or `retro_pixel` for classic sprites, 16-bit RPG actors, and requests that explicitly ask for pixel art.
+- Use `clean_hd` for map props or assets intended to match clean hand-painted HD maps.
+- Use `pixel_inspired` only when the user wants a pixel-adjacent look without retro chunkiness.
+- Use `map_style` or `project-native` when an existing map, game, or reference should define the style.
 
-```js
-// Input (held keys → actions once per frame)
-let steer = 0; // -1..+1, player-visible
-if (keys.has('KeyA') || keys.has('ArrowLeft'))  steer += 1;  // LEFT
-if (keys.has('KeyD') || keys.has('ArrowRight')) steer -= 1;  // RIGHT
-// Optional: steer = clamp(steer + gamepadX, -1, 1) with same sign convention
+If a reference is involved:
 
-// Integrate (speedFactor ~ 0..1 from |speed|)
-const reverse = speed >= 0 ? 1 : -1; // wheel-left still feels left in reverse
-yaw += steer * turnRate * speedFactor * reverse * dt;
+- Wire the reference into the call: pass its sandbox `file_path` to `imagine_image_to_image` — or the path list to `imagine_reference_to_image` for 2+ refs (generated images already have a `file_path`; local files use their sandbox path). Also `read_file` local references so you can see them.
+- State the reference role explicitly: preserve identity/style, create an animation sheet for the same subject, create an evolution/variant, or derive a matching prop/FX.
+- Preserve the stable identity markers from the reference: silhouette, palette, face/eye features, costume marks, major accessories, and material language.
+- Let only the requested action or evolution change. Do not redesign the subject unless the user asks.
+- Still require exact sheet shape, solid magenta background, frame containment, and same scale across frames.
 
-// Move along heading
-const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
-position.x += fx * speed * dt;
-position.z += fz * speed * dt;
-```
+Keep the strict parts:
 
-**Canonical bug (do not copy):**
+- solid `#FF00FF` background
+- exact sheet shape
+- same character or asset identity across frames
+- same bounding box and pixel scale across frames
+- explicit containment: nothing may cross cell edges
 
-```js
-// WRONG — this is what ships inverted A/D in the wild
-if (KeyA) steer -= 1;
-if (KeyD) steer += 1;
-yaw += steer * turnRate * dt;  // A → −yaw → nose RIGHT on chase cam
-```
+Mixed-action atlas guardrail:
 
-If you already wrote `KeyA → steer--`, either **swap the key mapping** or
-**negate once at integrate** (`yaw += -steer * …`) — then run §5. Do not flip
-twice (keys + integrate + bank mesh).
+- Do not ask `imagine_text_to_image` to generate unrelated action rows in one raw sheet, such as `row 1 idle, row 2 run, row 3 shoot, row 4 jump`, for a controllable hero or main character.
+- Do not ask `imagine_text_to_image` to generate raw single-row action strips such as `1x4 idle`, `1x4 run`, `1x4 shoot`, or `1x4 jump` for a controllable hero, character, creature, NPC, enemy, summon, or animated prop.
+- If an engine needs a combined `4x4`, `5x5`, custom atlas, or row-strip delivery format, generate the action grids separately, process and QC them separately, then assemble the delivery atlas deterministically.
+- Exceptions are canonical directional locomotion sheets, one continuous long action sequence, prop packs, tileset-like atlases, and low-stakes compact enemy combat sheets. These still need one coherent prompt and visual QC.
+- Keep projectile, muzzle flash, impact, dust trails, and detached FX in separate sheets unless they are intentionally part of the same action silhouette and remain tightly attached.
+- For controllable heroes and main characters, "tightly attached" is not enough when the effect makes the action bbox much wider or taller than idle/run. Split wide slash arcs, muzzle flashes, long weapon trails, dust clouds, and impact bursts into separate FX sheets by default.
 
-### 2c. Fixed-wing flight (airplane, glider, RC plane)
+Animated body grid guardrail:
 
-| Input | Action | Player expectation |
-|-------|--------|--------------------|
-| **A / ←** | **Roll left** (aileron) | Left wing down / bank left |
-| **D / →** | **Roll right** | Right wing down / bank right |
-| **W / ↑** | Pitch (pick one scheme and label HUD) | Usually nose down *or* pull-up — be consistent |
-| **S / ↓** | Opposite pitch | |
-| **Q / E** | Yaw / rudder (optional) | Q left, E right |
+- `1x4` and other raw single-row sheets are not valid defaults for animated bodies. This includes players, controllable heroes, creatures, NPCs, enemies, summons, animated props, and body-attached combat actions.
+- Use `2x2` for 4-frame body actions. This is the default for idle, short attack, shoot body, jump, hurt, hover, and compact side-view walk/run actions.
+- Use `2x3` for 6-frame body actions such as cast, attack, summon, run, charge, or transformation.
+- Use `2x4`, `3x3`, `3x4`, or `4x4` for longer body actions. Prefer a compact grid over a long row.
+- For 4-direction top-down walk, `4x4` can remain a raw generation shape because it is a canonical directional locomotion sheet, not four unrelated action rows.
+- If final runtime needs a row strip, assemble it after QC from the processed multi-row grid frames.
+- Keep the character centered in every cell. The body centerline should stay near the cell center, feet/bottom anchor should stay on the same y-position when visible, and the subject should occupy only the central safe area with generous magenta padding.
+- For attack, shoot, cast, charge, and other body actions, the body height should stay close to the accepted idle/run body height. If a fixed-cell runtime is being used, reject body-action output when the body appears more than about 10-15% smaller than idle/run, even if `edge_touch_frames` is empty.
 
-- **A/D are not strafe** and not “ground steer with FPS signs.”
-- Apply roll in the craft’s **local forward axis** with a sign that matches
-  **bank left on A**. If the mesh banks the wrong way, flip **one** sign on the
-  roll apply (or on the A/D → roll mapping), not the whole basis.
-- Coordinated turn: positive bank should produce a turn that matches the bank
-  direction under the chase/external cam.
+Map prop pack guardrail:
 
-### 2d. Heli / drone / 6DOF
+- Use square `2x2`, `3x3`, and `4x4` raw prop packs only for compact props such as rocks, shrubs, barrels, crates, lamps, small signs, pots, debris, and small ornaments.
+- Do not use square prop packs for wide or collision-critical map objects: floors, platforms, ledges, terrain chunks, bridges, wall runs, ladders, roads, rails, pipes, long spike traps, gates, doors, buildings, large trees, checkpoints, exits, or build pads.
+- Use one-by-one generation for unique, large, important, tall, irregular, or collision-aligned props.
+- Use `1x3` or `1x4` strips for repeatable platform/floor assets, with left cap, middle repeat, right cap, and optional slope/corner/end variant.
+- Use custom wide cells for multiple similar wide objects. The grid must state explicit non-square cell dimensions and must not mix compact props with platform/terrain objects.
+- If a square prop pack fails due to edge touch or bad cropping, do not solve it by relaxing QC. Reclassify the object and regenerate with a more suitable sheet shape.
 
-Document the scheme on a start overlay. Minimum:
-
-- Throttle/altitude on discrete keys must **not** stick “always up” after one
-  press (use held state or explicit up/down).
-- Strafe/yaw: **A left, D right** in the craft’s horizontal frame (player-visible).
-
-### 2e. 2D side-scroller / platformer
-
-**D / →** moves **right on screen**; **A / ←** moves **left**. Gravity only
-inverted if the genre is explicitly upside-down.
-
----
-
-## 3. Camera must agree
-
-- Chase cam: `desired = craftPos + up*height + forward*(-followDist)`; lerp;
-  `lookAt(craft)`.
-- Compute `forward` **once** for both movement and camera — do not rebuild with
-  opposite yaw sign in the camera path.
-- Debug order: (1) keys register → (2) signs correct (§5) → (3) camera agrees.
-
----
-
-## 4. Input plumbing (brief)
-
-- Track keys with a `Set` on `keydown`/`keyup` using **`event.code`**; clear on
-  `blur` / `visibilitychange`. Move in the game loop with **dt**, not in the
-  key handler.
-- Unify keyboard + touch + gamepad into **actions** (`throttle`, `steer`,
-  `pitch`, `roll`, …). See `building-games/references/input.md`.
-- Touch: left stick = move/steer, right = actions; ≥44px targets.
-
----
-
-## 5. Mandatory control self-test (before “done”)
-
-Screenshot-only is **not** enough for any craft with A/D.
-
-### 5a. Player-visible checklist (every vehicle / flight build)
-
-While **moving forward** (speed > small epsilon), chase cam behind:
-
-| Hold | Must observe within ~0.5s |
-|------|---------------------------|
-| **A** | Nose or bank moves **left** on screen |
-| **D** | Nose or bank moves **right** on screen |
-| **W** (ground) | Speed increases / moves along facing |
-| **S** (ground) | Brakes or reverse (as designed) |
-
-If A fails: flip steer/roll sign **once**, retest both A and D.
-
-### 5b. Minimal test interface (implement this)
-
-Expose a tiny hook so you (and automated QA) can prove signs without guessing
-private closures:
-
-```js
-// e.g. src/game/controlsTest.ts — dev/QA only is fine
-export type ControlsProbe = {
-  getYaw: () => number;       // radians; or getHeading()
-  getSpeed: () => number;
-  /** Inject held actions instead of real keys; both stay applied until you
-   *  change them, so §5c can hold a key across frames and clear at the end. */
-  setSteer?: (v: number) => void; // -1..1, same sign as production
-  setKeys?: (codes: string[]) => void; // held until the next call; `[]` clears
-};
-
-declare global {
-  interface Window {
-    __controlsTest?: ControlsProbe;
-  }
-}
-```
-
-Wire `window.__controlsTest` from the game loop when `import.meta.env.DEV` or a
-`?qa=1` flag is set.
-
-### 5c. Automated smoke (run it)
-
-Drive the §5b probe with the preinstalled **`agent-browser`** CLI — that is the
-first move, not a hand-written script. **A thrown `eval` exits non-zero; a
-merely falsy one does not**, so assert by throwing. Run it as one `batch` — one
-CLI call, not one per verb — taking JSON on stdin; `--bail` stops at the first
-failing step and exits non-zero.
+If a layout guide is useful, generate one before calling built-in `imagine_text_to_image`:
 
 ```bash
-agent-browser batch --bail <<'JSON'   # find's label is case-sensitive: copy it from `snapshot -i`
-[["open","http://127.0.0.1:8080/"],
- ["find","text","Start","click"],
- ["eval","if (!window.__controlsTest?.setKeys) throw Error('no §5b probe: add setKeys')"],
- ["eval","__controlsTest.setKeys(['KeyW'])"],
- ["wait","600"],
- ["eval","if (__controlsTest.getSpeed() <= 0.1) throw Error('W: no move')"],
- ["eval","(async () => { const t = __controlsTest, y0 = t.getYaw(); t.setKeys(['KeyW','KeyA']); await new Promise(r => setTimeout(r, 300)); t.setKeys(['KeyW']); const d = t.getYaw() - y0, w = Math.atan2(Math.sin(d), Math.cos(d)); if (w < -0.05) throw Error('A turns RIGHT — inverted, got ' + w.toFixed(2)); if (w <= 0.05) throw Error('A barely turned (' + w.toFixed(2) + ') — hold longer or check the sim is running'); return 'A ok' })()"],
- ["eval","__controlsTest.setKeys([])"],
- ["screenshot","/workspace/screenshots/controls.png"],
- ["close"]]
-JSON
+python3 .grok/skills/generate2dsprite/scripts/make_layout_guide.py \
+  --rows <rows> \
+  --cols <cols> \
+  --cell-width 384 \
+  --cell-height 384 \
+  --output <run-dir>/references/<rows>x<cols>-layout-guide.png
 ```
 
-**Hold keys through the probe, not with `keydown`** — `agent-browser keydown`
-does not reach §4's `Set`, so a correct game reads as broken. No `setKeys` on
-your probe? Add it (§5b), or dispatch the key event yourself — the browser-QA
-reference's **Keys** note has the mechanism and the form.
+Then pass the guide PNG's sandbox path to `imagine_image_to_image` — a guide that is only "visible in conversation" never reaches the image model. Also `read_file` it so you can see the geometry. Tell `imagine_image_to_image` to use it only for invisible slot count, spacing, centering, and safe padding. The output must not reproduce guide boxes, safe-area rectangles, center marks, labels, borders, or guide background.
 
-The hold sits **inside** one `eval`: spread across commands it lasts however
-long they take, and the ±π wrap in `Math.atan2(Math.sin(d), Math.cos(d))`
-reads a craft that turned more than π as one turning the other way. The IIFE is
-what keeps the step re-runnable — a bare `const d = …` fails the second time
-with "already declared" — and `async` is what lets the hold run in page time.
-Repeat for **D** with `'KeyD'` and both comparisons mirrored (`w > 0.05` is
-inverted, `w >= -0.05` is barely), single-quoted so the JSON needs no escapes;
-for planes assert **roll**: A ⇒ bank left.
+Use layout guides deliberately:
 
-**`A turns RIGHT`** is the sign error: flip **one** sign and re-run.
-**`A barely turned`** is not — the craft moved the right way, just less than
-0.05 rad in 300 ms, which a boat or a heavy rover will do; raise the hold, or
-check the sim is running, and flip nothing. Any other non-zero exit — no probe,
-a wedged daemon — means the check never ran: read the message first. Read the
-browser-QA reference `AGENTS.md` links before your first flow — verbs, argument
-shapes and the fallback are there.
+- recommended for `prop_pack_3x3`, `prop_pack_4x4`, tileset-like atlases, fixed multi-row animation grids, and non-directional 16-frame action sequences such as casting, summoning, charging, death, or transformation
+- optional for `3x3` large idle and high-value showcase loops when previous generations drift in scale or spacing
+- not the default for `4x4` four-direction walk sheets, because the guide can make directional poses too conservative; use it only after an unguided run fails layout or edge safety
 
-### 5d. What not to do
+### 3. Generate the raw image
 
-- Do **not** only test “D increases some internal variable.”
-- Do **not** use FPS “D → +X when facing −Z” as the vehicle pass condition.
-- Do **not** flip mesh bank, camera, and steer all at once when fixing — change
-  **one** sign, retest.
+Use built-in `imagine_text_to_image`.
 
----
+Do not use Three.js, Canvas, SVG, HTML/CSS, PIL drawing, or other code-generated art as the raw sprite source. These are acceptable only for runtime display, debug overlays, deterministic layout guides, or postprocessing already-generated images.
 
-## 6. Finish criteria (controls)
+After generation:
 
-- [ ] Opened **this** skill before writing movement/steer/flight.
-- [ ] Genre map chosen (§2) and start-screen / HUD labels match it.
-- [ ] Chase-cam A/D player-visible test **passed** (§5a).
-- [ ] `window.__controlsTest` (or equivalent) available in dev/QA and used once.
-- [ ] No inverted bank mesh relative to roll/steer input.
-- [ ] Keys are held-state + dt-scaled; no sticky thrust from a single Space tap
-      unless intentional and labeled.
+- keep the returned sandbox `file_path`
+- copy that file into the working output folder as `raw-sheet.png` (or similar)
+- keep the original generated image in place
+- to run a further Imagine edit on a **postprocessed** PNG, pass that PNG's sandbox path to `imagine_image_to_image`
 
-If any box is unchecked, the game is **not** done.
+### 4. Postprocess locally
+
+Run the processor on the raw image:
+
+```bash
+# --target is ONLY: player | npc | creature | asset
+# Map character/spell/projectile/prop/summon/fx → --target asset (or player/npc/creature).
+# --mode must be a known grid mode (idle/walk/attack/shoot/jump/…) OR pass both --rows and --cols.
+python3 .grok/skills/generate2dsprite/scripts/generate2dsprite.py process \
+  --input <run-dir>/raw-sheet.png \
+  --target <player|npc|creature|asset> \
+  --mode <idle|walk|run|attack|shoot|jump|cast|hurt|projectile|impact|fx|player_sheet|…> \
+  --output-dir <run-dir> \
+  --shared-scale \
+  --align feet
+# Custom grid example:
+#   --mode sheet --rows 2 --cols 3 --label-prefix frame
+```
+
+List valid targets/modes: `python3 …/generate2dsprite.py list-options`
+
+The processor is intentionally low-level. The agent chooses:
+
+- `rows` / `cols`
+- `fit_scale`
+- `align`
+- `shared_scale`
+- `component_mode`
+- `component_padding`
+- `edge_touch` rejection strategy
+
+Use the processor to gather QC metadata, not to make aesthetic decisions for you.
+
+For hero action bundles, process each action grid as its own sheet before any final atlas assembly. Use `component_mode=largest` for body-only hero grids. Use `component_mode=all` only for projectile, impact, aura, slash FX, or intentionally detached FX sheets, not for fixed-cell hero body attacks that need stable body scale.
+
+### 5. QC the result
+
+Check:
+
+- did any frame touch the cell edge
+- did any frame resize differently than intended
+- did detached effects become noise
+- does the sheet still read as one coherent animation
+- for hero/player body actions, does the body height match the accepted idle/run scale within roughly 10-15%
+- for fixed-cell runtimes, did a wide weapon trail or FX arc shrink the body inside the cell
+
+If not, rerun with different processor settings or regenerate the raw sheet.
+
+### 6. Return the right bundle
+
+For a single sheet, expect:
+
+- `raw-sheet.png`
+- `raw-sheet-clean.png`
+- `sheet-transparent.png`
+- frame PNGs
+- `animation.gif`
+- `prompt-used.txt`
+- `pipeline-meta.json`
+
+For `player_sheet`, expect:
+
+- transparent 4x4 sheet
+- 16 frame PNGs
+- direction strips
+- 4 direction GIFs
+
+For `spell_bundle` or `unit_bundle`, create one folder per asset in the bundle.
+
+For `hero_action_bundle`, expect:
+
+- one raw and processed sheet per action
+- per-action frame PNGs and GIFs for visual QC
+- separate projectile / muzzle / slash / impact assets when the hero shoots, casts, or uses wide melee effects
+- optional assembled `engine-atlas-transparent.png` only after per-action QC passes
+
+## Defaults
+
+- `idle`
+  - small or medium actor -> `2x2`
+  - large creature or boss -> `3x3`
+- `cast` -> prefer `2x3`
+- `projectile` -> prefer `2x2` for short animated loops; use row strips only when the engine specifically requires a strip, and assemble that strip after QC when practical
+- `impact` / `explode` -> prefer `2x2`
+- `walk`
+  - topdown actor -> `4x4` for four-direction walk
+  - side-view asset -> `2x2`
+- controllable hero or main player with multiple actions -> `hero_action_bundle`
+  - generate one action per raw multi-row grid sheet, not as a raw `1x4` strip
+  - attack/shoot/cast body sheets are body-only by default; wide slash arcs, muzzle flashes, projectiles, trails, dust, and hit impacts are separate FX/projectile/impact sheets
+  - default 4-frame action grid is `2x2`
+  - use `2x3` for 6-frame actions and `2x4`, `3x3`, `3x4`, or `4x4` for longer actions
+  - do not generate a mixed-action raw `4x4`, `5x5`, or custom atlas
+  - assemble the final atlas only as a deterministic delivery step if the game requires it
+- `4x4`, `5x5`, and custom grids
+  - use as raw generation only for one coherent long action sequence, canonical directional locomotion, prop packs, or tileset-like atlases
+  - use as delivery atlases for mixed actions only after separate action sheets pass QC
+- use `shared_scale` by default for any multi-frame asset where frame-to-frame consistency matters
+- use `largest` component mode for hero/player body grids; use `all` for separate FX/projectile/impact sheets
+
+## Resources
+
+- `references/modes.md`: asset, action, bundle, and sheet selection
+- `references/prompt-rules.md`: manual prompt patterns and containment rules
+- `scripts/generate2dsprite.py`: postprocess primitive for cleanup, extraction, alignment, QC, and GIF export
